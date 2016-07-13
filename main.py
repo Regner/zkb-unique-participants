@@ -16,16 +16,16 @@ NATS_SERVERS = os.environ.get('NATS_SERVERS', 'nats://127.0.0.1:4222')
 
 
 async def run(loop):
-  client = Client()
-  servers = NATS_SERVERS.split(',')
+    client = Client()
+    servers = NATS_SERVERS.split(',')
 
-  await client.connect(io_loop=loop, servers=servers)
+    await client.connect(io_loop=loop, servers=servers)
 
-  async def message_handler(msg):
-    print(msg)
+    async def message_handler(msg):
+        logger.info('Got message {}'.format(msg))
 
-  sid = await client.subscribe('zkillboard.raw', cb=message_handler)
-  
+    sid = await client.subscribe('zkillboard.raw', cb=message_handler)
+
 
 if __name__ == '__main__':
   loop = asyncio.get_event_loop()
