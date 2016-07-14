@@ -58,6 +58,7 @@ def find_all_unique_ids(killmail):
 
     return converted_ids
 
+
 async def run(loop):
     client = Client()
     servers = NATS_SERVERS.split(',')
@@ -65,14 +66,11 @@ async def run(loop):
     await client.connect(io_loop=loop, servers=servers)
     logger.info('Connected to NATS server...')
 
-
     async def message_handler(msg):
         try:
             data = json.loads(msg.data.decode())
             killmail = data['killmail']
-
             unique_ids = find_all_unique_ids(killmail)
-            logger.info(unique_ids)
 
             payload = {
                 'ids': unique_ids,
@@ -86,7 +84,7 @@ async def run(loop):
         except Exception as e:
             logger.info('Got exception: {}'.format(e))
 
-    await client.subscribe('zkillboard.raw', cb=message_handler)
+    await client.subscribe('zkillboard.raw', 'zkb-unique-participants', message_handler)
 
 
 if __name__ == '__main__':
