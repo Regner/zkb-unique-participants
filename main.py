@@ -2,10 +2,8 @@
 
 import os
 import json
-import asyncio
+import pika
 import logging
-
-from nats.aio.client import Client
 
 
 logging.basicConfig()
@@ -13,81 +11,74 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 # App Settings
-NATS_SERVERS = os.environ.get('NATS_SERVERS', 'nats://127.0.0.1:4222')
+RABBITMQ_SERVER = os.environ.get('RABBITMQ_SERVER', 'rabbitmq-alpha')
 
-def find_entity_ids(entity):
-    ids = {}
-    ids['character'] = entity['character']['id'] if 'character' in entity else None
-    ids['corporation'] = entity['corporation']['id'] if 'corporation' in entity else None
-    ids['alliance'] = entity['alliance']['id'] if 'alliance' in entity else None
+# RabbitMQ Setup
+connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_SERVER))
+channel = connection.channel()
 
-    return ids
-
-
-def merge_ids(old_ids, new_ids):
-    old_ids['characters'].add(new_ids['character'])
-    old_ids['corporations'].add(new_ids['corporation'])
-    old_ids['alliances'].add(new_ids['alliance'])
-
-    return old_ids
+channel.exchange_declare(exchange='regner', type='topic')
+channel.queue_declare(queue='zkb-unique-participants', durable=True)
+channel.queue_bind(exchange='regner', queue='zkb-unique-participants', routing_key='zkillboard.raw')
+logger.info('Connected to RabbitMQ server...')
 
 
-def find_all_unique_ids(killmail):
-    ids = {
-        'characters': set(),
-        'corporations': set(),
-        'alliances': set(),
+def callback(ch, method, properties, body):
+    data = json.loads(body.decode())
+    killmail = data['killmail']
+    unique_ids = {
+        'attackers': {},
+        'victim': {},
     }
 
-    new_ids = find_entity_ids(killmail['victim'])
-    ids = merge_ids(ids, new_ids)
+    if 'character' in killmail['victim'] :
+        unique_ids['victim']['character'] = killmail['victim']['character']['id']
+    
+    if 'corporation' in killmail['victim']:
+        unique_ids['victim']['corporation'] = killmail['victim']['corporation']['id']
+    
+    if 'alliance' in killmail['victim']:
+        unique_ids['victim']['alliance'] = killmail['victim']['alliance']['id']
+
+    attacker_chars = set()
+    attacker_corps = set()
+    attacker_allis = set()
 
     for attacker in killmail['attackers']:
-        new_ids = find_entity_ids(attacker)
-        ids = merge_ids(ids, new_ids)
+        if 'character' in attacker :
+            attacker_chars.add(attacker['character']['id'])
+        
+        if 'corporation' in attacker:
+            attacker_corps.add(attacker['corporation']['id'])
+        
+        if 'alliance' in attacker:
+            attacker_allis.add(attacker['alliance']['id'])
 
-    ids['characters'].discard(None)
-    ids['corporations'].discard(None)
-    ids['alliances'].discard(None)
-
-    converted_ids = {
-        'characters': list(ids['characters']),
-        'corporations': list(ids['corporations']),
-        'alliances': list(ids['alliances']),
+    unique_ids['attackers'] = {
+        'characters': list(attacker_chars),
+        'corporations': list(attacker_corps),
+        'alliances': list(attacker_allis),
     }
 
-    return converted_ids
+
+    payload = {
+        'ids': unique_ids,
+        'zkb_data': data,
+    }
+
+    logging.info('Processed killmail with ID {}.'.format(killmail['killID']))
+
+    channel.basic_publish(
+        exchange='regner',
+        routing_key='zkillboard.processed.unique_ids',
+        body=json.dumps(payload),
+        properties=pika.BasicProperties(
+            delivery_mode = 2,
+        ),
+    )
+    ch.basic_ack(delivery_tag = method.delivery_tag)
 
 
-async def run(loop):
-    client = Client()
-    servers = NATS_SERVERS.split(',')
-
-    await client.connect(io_loop=loop, servers=servers)
-    logger.info('Connected to NATS server...')
-
-    async def message_handler(msg):
-        try:
-            data = json.loads(msg.data.decode())
-            killmail = data['killmail']
-            unique_ids = find_all_unique_ids(killmail)
-
-            payload = {
-                'ids': unique_ids,
-                'zkb_data': data,
-            }
-
-            count = len(unique_ids['characters']) + len(unique_ids['corporations']) + len(unique_ids['alliances'])
-            logging.info('Found {} unique IDs in killmail ID {}'.format(count, killmail['killID']))
-
-            await client.publish('zkillboard.processed.unique_ids', str.encode(json.dumps(payload)))
-        except Exception as e:
-            logger.info('Got exception: {}'.format(e))
-
-    await client.subscribe('zkillboard.raw', 'zkb-unique-participants', message_handler)
-
-
-if __name__ == '__main__':
-  loop = asyncio.get_event_loop()
-  loop.run_until_complete(run(loop))
-  loop.run_forever()
+channel.basic_qos(prefetch_count=1)
+channel.basic_consume(callback, queue='zkb-unique-participants')
+channel.start_consuming()
